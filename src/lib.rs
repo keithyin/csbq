@@ -59,7 +59,7 @@ impl Model {
 
 #[derive(Debug, Clone, Copy)]
 pub enum PlpState {
-    Eq,
+    Eq(u8),
     Diff(u8), // diff and the difference base
     Del,
     Ins(u8), // insertion base
@@ -156,7 +156,9 @@ pub fn info_collector(
                 == *query_seq.get_unchecked(qpos.unwrap() as usize)
             {
                 // eq
-                locus_info.push_plp_state(PlpState::Eq);
+                locus_info.push_plp_state(PlpState::Eq(
+                    *query_seq.get_unchecked(qpos.unwrap() as usize),
+                ));
             } else {
                 // diff
                 locus_info.push_plp_state(PlpState::Diff(
@@ -176,25 +178,7 @@ pub fn calibrate_single_contig_use_bayes(
 ) -> Vec<u8> {
     let qual = single_contig_locus_info
         .iter()
-        .map(|locus_info| {
-            let numerator = join_prob(locus_info.cur_base, &locus_info.plp_infos, model);
-            let denominator = locus_info
-                .get_other_bases()
-                .into_iter()
-                .map(|cur_base| join_prob(cur_base, &locus_info.plp_infos, model))
-                .reduce(|acc, v| acc + v)
-                .unwrap();
-            numerator / denominator
-        })
-        .map(|baseq| {
-            if baseq > (1. - 1e-6) {
-                1. - 1e-6
-            } else {
-                baseq
-            }
-        })
-        .map(|baseq| -10. * (1. - baseq).log10())
-        .map(|phreq| phreq as u8)
+        .map(|locus_info| single_locus_bayes(locus_info, model))
         .collect::<Vec<_>>();
     qual
 }
@@ -203,7 +187,9 @@ fn join_prob(cur_base: u8, plp_infos: &Vec<PlpState>, model: &Model) -> f32 {
     let value = plp_infos
         .iter()
         .map(|plp_state| match *plp_state {
-            PlpState::Eq => model.get_prob_with_ref_called_base(cur_base, cur_base).ln(),
+            PlpState::Eq(called_base) => model
+                .get_prob_with_ref_called_base(cur_base, called_base)
+                .ln(),
             PlpState::Diff(called_base) => model
                 .get_prob_with_ref_called_base(cur_base, called_base)
                 .ln(),
@@ -217,11 +203,53 @@ fn join_prob(cur_base: u8, plp_infos: &Vec<PlpState>, model: &Model) -> f32 {
     value.exp()
 }
 
+fn single_locus_bayes(locus_info: &LocusInfo, model: &Model) -> u8 {
+    let numerator = join_prob(locus_info.cur_base, &locus_info.plp_infos, model);
+    let denominator = ALL_BASES
+        .into_iter()
+        .map(|cur_base| join_prob(cur_base, &locus_info.plp_infos, model))
+        .reduce(|acc, v| {
+            println!("{}", v);
+            acc + v
+        })
+        .unwrap();
+
+    let mut posterior = numerator / denominator;
+    println!("{}/{} = {}", numerator, denominator, posterior);
+
+    posterior = if posterior > (1. - 1e-6) {
+        1. - 1e-6
+    } else {
+        posterior
+    };
+
+    let phreq = (-10. * (1. - posterior).log10()) as u8;
+    phreq
+}
+
 #[cfg(test)]
 mod test {
+    use crate::{join_prob, single_locus_bayes, LocusInfo, Model, PlpState};
 
     #[test]
-    fn say_hello() {
-        println!("hello world");
+    fn test_join_prob() {
+        let cur_base = 'A' as u8;
+        let model = Model::new("model/default.txt");
+        let plp_infos = vec![PlpState::Eq('A' as u8), PlpState::Eq('A' as u8)];
+
+        let prob = join_prob(cur_base, &plp_infos, &model);
+        assert!((prob - 0.2025).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_single_locus_bayes() {
+        let cur_base = 'A' as u8;
+        let model = Model::new("model/default.txt");
+
+        let mut locus_info = LocusInfo::new(0, cur_base);
+        locus_info.push_plp_state(PlpState::Eq('A' as u8));
+
+        let q = single_locus_bayes(&locus_info, &model);
+        assert_eq!(q, 12);
     }
 }
