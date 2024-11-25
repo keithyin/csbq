@@ -7,3 +7,11 @@ license = "MIT"
 repository ="https://github.com/keithyin/csbq/tree/main"
 
 [dependencies]
+clap = {version="4.4", features=["derive"]}
+gskits="0.8"
+mm2 = "0.10"
+asts = "0.4"
+crossbeam = "0.8"
+num_cpus="1.16"
+rust-htslib = "0.47.0"
+# num = "0.4"
