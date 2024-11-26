@@ -509,6 +509,9 @@ dependencies = [
  "mm2",
  "num_cpus",
  "rust-htslib",
+ "time",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

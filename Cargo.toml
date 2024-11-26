@@ -12,6 +12,10 @@ gskits="0.8"
 mm2 = "0.10"
 asts = "0.4"
 crossbeam = "0.8"
+time = "0.3.34"
+
 num_cpus="1.16"
 rust-htslib = "0.47.0"
+tracing = "0.1.40"
+tracing-subscriber = {version="0.3.18", features=["json", "env-filter", "fmt", "time", "local-time"]}
 # num = "0.4"

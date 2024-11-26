@@ -1,9 +1,9 @@
 use std::{collections::HashMap, fs};
 
 use crossbeam::channel::Receiver;
-use gskits::gsbam::bam_record_ext::BamRecord;
+use gskits::{gsbam::bam_record_ext::BamRecord, pbar};
 use mm2::AlignResult;
-use rust_htslib::bam::{self, ext::BamRecordExtensions, Read};
+use rust_htslib::bam::ext::BamRecordExtensions;
 // use num::Float;
 
 pub mod hsc_csbq;
@@ -101,25 +101,45 @@ impl LocusInfo {
 pub fn cali_worker_for_hsc(
     recv: Receiver<AlignResult>,
     all_contig_locus_info: &mut HashMap<i32, Vec<LocusInfo>>,
-    ref_data: &HashMap<i32, &String>,
     model: &Model,
+    use_pbar: bool,
 ) -> HashMap<i32, Vec<u8>> {
+    let pb = if use_pbar {
+        Some(pbar::get_spin_pb(
+            "collect plp info".to_string(),
+            pbar::DEFAULT_INTERVAL,
+        ))
+    } else {
+        None
+    };
+
     for align_res in recv {
+        pb.as_ref().map(|pb_| pb_.inc(1));
         for record in align_res.records {
             let tid = record.tid();
             let single_contig_locus_info = all_contig_locus_info.get_mut(&tid).unwrap();
-            let ref_seq = ref_data.get(&tid).unwrap();
-            collect_plp_info_from_record(&record, single_contig_locus_info, ref_seq);
+            collect_plp_info_from_record(&record, single_contig_locus_info);
         }
     }
+    pb.as_ref().map(|pb_| pb_.finish());
 
+    let pb = if use_pbar {
+        Some(pbar::get_spin_pb(
+            " do calibration".to_string(),
+            pbar::DEFAULT_INTERVAL,
+        ))
+    } else {
+        None
+    };
     let calibrated_qual: HashMap<i32, Vec<u8>> = all_contig_locus_info
         .iter()
         .map(|(tid, single_contig_locus_info)| {
+            pb.as_ref().map(|pb_| pb_.inc(1));
             let qual = calibrate_single_contig_use_bayes(single_contig_locus_info, model);
             (*tid, qual)
         })
         .collect::<HashMap<_, _>>();
+    pb.as_ref().map(|pb_| pb_.finish());
 
     calibrated_qual
 }
@@ -127,13 +147,10 @@ pub fn cali_worker_for_hsc(
 pub fn collect_plp_info_from_record(
     record: &BamRecord,
     single_contig_locus_info: &mut Vec<LocusInfo>,
-    ref_seq: &str,
 ) {
     if record.is_secondary() || record.is_unmapped() || record.is_supplementary() {
         return;
     }
-
-    let refseq_bytes = ref_seq.as_bytes();
 
     let ref_start = record.reference_start();
     let ref_end = record.reference_end();
@@ -184,9 +201,7 @@ pub fn collect_plp_info_from_record(
         }
 
         unsafe {
-            if *refseq_bytes.get_unchecked(rpos.unwrap() as usize)
-                == *query_seq.get_unchecked(qpos.unwrap() as usize)
-            {
+            if locus_info.cur_base == *query_seq.get_unchecked(qpos.unwrap() as usize) {
                 // eq
                 locus_info.push_plp_state(PlpState::Eq(
                     *query_seq.get_unchecked(qpos.unwrap() as usize),
@@ -216,6 +231,9 @@ pub fn calibrate_single_contig_use_bayes(
 }
 
 pub fn join_prob(cur_base: u8, plp_infos: &Vec<PlpState>, model: &Model) -> f32 {
+    if plp_infos.len() == 0 {
+        return 1e-10;
+    }
     let value = plp_infos
         .iter()
         .map(|plp_state| match *plp_state {
@@ -237,20 +255,23 @@ pub fn join_prob(cur_base: u8, plp_infos: &Vec<PlpState>, model: &Model) -> f32 
 
 pub fn single_locus_bayes(locus_info: &LocusInfo, model: &Model) -> u8 {
     let numerator = join_prob(locus_info.cur_base, &locus_info.plp_infos, model);
+    if numerator < 1e-9 {
+        return 0;
+    }
     let denominator = ALL_BASES
         .into_iter()
         .map(|cur_base| join_prob(cur_base, &locus_info.plp_infos, model))
         .reduce(|acc, v| {
-            println!("{}", v);
+            // println!("{}", v);
             acc + v
         })
         .unwrap();
 
     let mut posterior = numerator / denominator;
-    println!("{}/{} = {}", numerator, denominator, posterior);
+    // println!("{}/{} = {}", numerator, denominator, posterior);
 
-    posterior = if posterior > (1. - 1e-6) {
-        1. - 1e-6
+    posterior = if posterior > (1. - 1e-5) {
+        1. - 1e-5
     } else {
         posterior
     };
@@ -283,5 +304,12 @@ mod test {
 
         let q = single_locus_bayes(&locus_info, &model);
         assert_eq!(q, 12);
+
+        locus_info.push_plp_state(PlpState::Diff('C' as u8));
+        let q = single_locus_bayes(&locus_info, &model);
+        assert_eq!(q, 2);
+
+
+
     }
 }
