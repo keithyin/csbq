@@ -1,6 +1,8 @@
 use std::{collections::HashMap, fs};
 
+use crossbeam::channel::Receiver;
 use gskits::gsbam::bam_record_ext::BamRecord;
+use mm2::AlignResult;
 use rust_htslib::bam::{self, ext::BamRecordExtensions, Read};
 // use num::Float;
 
@@ -90,9 +92,39 @@ impl LocusInfo {
             .filter(|base| *base != self.cur_base)
             .collect()
     }
+
+    pub fn get_pos(&self) -> usize {
+        self.pos
+    }
 }
 
-pub fn info_collector(
+pub fn cali_worker_for_hsc(
+    recv: Receiver<AlignResult>,
+    all_contig_locus_info: &mut HashMap<i32, Vec<LocusInfo>>,
+    ref_data: &HashMap<i32, &String>,
+    model: &Model,
+) -> HashMap<i32, Vec<u8>> {
+    for align_res in recv {
+        for record in align_res.records {
+            let tid = record.tid();
+            let single_contig_locus_info = all_contig_locus_info.get_mut(&tid).unwrap();
+            let ref_seq = ref_data.get(&tid).unwrap();
+            collect_plp_info_from_record(&record, single_contig_locus_info, ref_seq);
+        }
+    }
+
+    let calibrated_qual: HashMap<i32, Vec<u8>> = all_contig_locus_info
+        .iter()
+        .map(|(tid, single_contig_locus_info)| {
+            let qual = calibrate_single_contig_use_bayes(single_contig_locus_info, model);
+            (*tid, qual)
+        })
+        .collect::<HashMap<_, _>>();
+
+    calibrated_qual
+}
+
+pub fn collect_plp_info_from_record(
     record: &BamRecord,
     single_contig_locus_info: &mut Vec<LocusInfo>,
     ref_seq: &str,
@@ -166,7 +198,7 @@ pub fn info_collector(
                 ));
             }
         }
-        if rpos_cursor.unwrap() as usize == (ref_end as usize - 1) {
+        if ref_pos_cur_or_pre == (ref_end as usize - 1) {
             break;
         }
     }
@@ -183,7 +215,7 @@ pub fn calibrate_single_contig_use_bayes(
     qual
 }
 
-fn join_prob(cur_base: u8, plp_infos: &Vec<PlpState>, model: &Model) -> f32 {
+pub fn join_prob(cur_base: u8, plp_infos: &Vec<PlpState>, model: &Model) -> f32 {
     let value = plp_infos
         .iter()
         .map(|plp_state| match *plp_state {
@@ -203,7 +235,7 @@ fn join_prob(cur_base: u8, plp_infos: &Vec<PlpState>, model: &Model) -> f32 {
     value.exp()
 }
 
-fn single_locus_bayes(locus_info: &LocusInfo, model: &Model) -> u8 {
+pub fn single_locus_bayes(locus_info: &LocusInfo, model: &Model) -> u8 {
     let numerator = join_prob(locus_info.cur_base, &locus_info.plp_infos, model);
     let denominator = ALL_BASES
         .into_iter()
