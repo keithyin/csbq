@@ -92,9 +92,9 @@ dependencies = [
 
 [[package]]
 name = "asts"
-version = "0.4.2"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "04d57a5c3ca27497631df7dc03c58b23d8142d04198777fbc7844b4bec1238c4"
+checksum = "51cb0f87a6d1cbdb2e91b9a2622390cf2ba300175d3e9d12e368cc49a6ec32eb"
 dependencies = [
  "anyhow",
  "clap",
@@ -500,7 +500,7 @@ checksum = "22ec99545bb0ed0ea7bb9b8e1e9122ea386ff8a48c0922e43f36d45ab09e0e80"
 
 [[package]]
 name = "csbq"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "asts",
  "clap",
@@ -700,14 +700,15 @@ checksum = "d2fabcfbdc87f4758337ca535fb41a6d701b65693ce38287d856d1674551ec9b"
 
 [[package]]
 name = "gskits"
-version = "0.8.5"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "82c3d050d6a616952712d637d02a273c69dc8b8c3a824b6559aba545327863d3"
+checksum = "d229e430df9c777988e73063f95d12f8fa54eda6c564c98c1e474ace35f829b1"
 dependencies = [
  "anyhow",
  "bio 2.0.3",
  "chrono",
  "indicatif",
+ "lazy_static",
  "num_cpus",
  "rust-htslib",
  "tracing",
@@ -1121,21 +1122,20 @@ checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
 
 [[package]]
 name = "minimap2"
-version = "0.1.20+minimap2.2.28"
+version = "0.1.21+minimap2.2.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b2b51f77f29885a7c115c41df9c9b500f037b706008ff639ed3733b80a490e0d"
+checksum = "a01677cfd97a5531c2b36ba7ade7e0c3222870a5c3579e237f84972c08a46d39"
 dependencies = [
  "libc",
  "minimap2-sys",
  "needletail",
- "simdutf8",
 ]
 
 [[package]]
 name = "minimap2-sys"
-version = "0.1.19+minimap2.2.28"
+version = "0.1.20+minimap2.2.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7b27cbfa7368abd87de720ae844d9aad28452fa5b415d8df629497b23c030ad6"
+checksum = "47d31565115502ac93fd101537bc1d6e32e56dd51538c42c82b927a3d58dad42"
 dependencies = [
  "cc",
  "libz-sys",
@@ -1144,9 +1144,9 @@ dependencies = [
 
 [[package]]
 name = "mm2"
-version = "0.10.3"
+version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "62fe7a879dccbe612ca5cf78fe3aa4c4ac6247eeebb5f6c7030ef1a49d0ec795"
+checksum = "2f42476b6478bb178e810fdbec57b7f40f959a2eeab4a459c8f1b35f7457e2ab"
 dependencies = [
  "anyhow",
  "bio 1.6.0",
@@ -1272,9 +1272,9 @@ dependencies = [
 
 [[package]]
 name = "needletail"
-version = "0.5.1"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "db05a5ab397f64070d8c998fa0fbb84e484b81f95752af317dac183a82d9295d"
+checksum = "f29a3c5015d6985f33318d154fa0c41315eb2e7df29432c844c74a83434bfe21"
 dependencies = [
  "buffer-redux",
  "bytecount",
@@ -1771,12 +1771,6 @@ dependencies = [
  "paste",
  "wide",
 ]
-
-[[package]]
-name = "simdutf8"
-version = "0.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
 
 [[package]]
 name = "smallvec"

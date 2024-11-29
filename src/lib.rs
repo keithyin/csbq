@@ -1,7 +1,7 @@
 use std::{collections::HashMap, fs};
 
 use crossbeam::channel::Receiver;
-use gskits::{gsbam::bam_record_ext::BamRecord, pbar};
+use gskits::{gsbam::bam_record_ext::{BamRecord, BamRecordExt}, pbar};
 use mm2::AlignResult;
 use rust_htslib::bam::ext::BamRecordExtensions;
 // use num::Float;
@@ -152,8 +152,11 @@ pub fn collect_plp_info_from_record(
         return;
     }
 
-    let ref_start = record.reference_start();
-    let ref_end = record.reference_end();
+    let record_ext = BamRecordExt::new(record);
+    let ref_start = record_ext.reference_start() as i64;
+    let ref_end = record_ext.reference_end() as i64;
+
+    let query_end = record_ext.query_alignment_end() as i64;
 
     let mut rpos_cursor = None;
     let mut qpos_cursor = None;
@@ -181,6 +184,12 @@ pub fn collect_plp_info_from_record(
 
         if qpos_cursor.is_none() {
             continue;
+        }
+
+        if let Some(qpos_cursor_) = qpos_cursor {
+            if qpos_cursor_ >= query_end {
+                break;
+            }
         }
 
         let ref_pos_cur_or_pre = rpos_cursor.unwrap() as usize;
@@ -213,9 +222,7 @@ pub fn collect_plp_info_from_record(
                 ));
             }
         }
-        if ref_pos_cur_or_pre == (ref_end as usize - 1) {
-            break;
-        }
+        
     }
 }
 

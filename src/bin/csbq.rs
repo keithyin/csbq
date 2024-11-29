@@ -128,13 +128,10 @@ pub fn hsc_csbq(
 
     let aligners = build_aligner(
         "map-ont",
-        &mm2::cli::IndexArgs {
-            kmer: Some(15),
-            wins: Some(10),
-        },
-        &mm2::cli::MapArgs {},
-        &mm2::cli::AlignArgs::default(),
-        &mm2::cli::OupArgs::default(),
+        &mm2::params::IndexParams{kmer: None, wins: None},
+        &mm2::params::MapParams::default(),
+        &mm2::params::AlignParams::default(),
+        &mm2::params::OupParams::default(),
         &targets,
     );
 
@@ -161,7 +158,7 @@ pub fn hsc_csbq(
         let query_files = &query_files;
         let (qs_sender, qs_recv) = crossbeam::channel::bounded(1000);
         s.spawn(move || {
-            mm2::query_seq_sender(query_files, qs_sender);
+            mm2::query_seq_sender(query_files, qs_sender, &&mm2::params::InputFilterParams::default());
         });
 
         let num_threads = threads.unwrap_or(num_cpus::get_physical());
@@ -169,7 +166,7 @@ pub fn hsc_csbq(
         for _ in 0..num_threads {
             let qs_recv_ = qs_recv.clone();
             let align_res_sender_ = align_res_sender.clone();
-            s.spawn(move || mm2::align_worker(qs_recv_, align_res_sender_, aligners, target2idx));
+            s.spawn(move || mm2::align_worker(qs_recv_, align_res_sender_, aligners, target2idx, &mm2::params::OupParams::default()));
         }
         drop(qs_recv);
         drop(align_res_sender);
@@ -250,7 +247,7 @@ fn smc_csbq(
 
         let (sbr_and_smc_sender, sbr_and_smc_recv) = crossbeam::channel::bounded(1000);
         s.spawn(move || {
-            asts::subreads_and_smc_generator(sorted_sbr, sorted_smc, sbr_and_smc_sender);
+            asts::subreads_and_smc_generator(sorted_sbr, sorted_smc, &mm2::params::InputFilterParams::default(), sbr_and_smc_sender);
         });
 
         let threads = threads.unwrap_or(num_cpus::get_physical());
