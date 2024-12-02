@@ -1,63 +1,23 @@
 use std::{collections::HashMap, fs};
 
 use crossbeam::channel::Receiver;
-use gskits::{gsbam::bam_record_ext::{BamRecord, BamRecordExt}, pbar};
+use gskits::{
+    gsbam::bam_record_ext::{BamRecord, BamRecordExt},
+    pbar,
+};
 use mm2::AlignResult;
+use models::TUnigramModel;
 use rust_htslib::bam::ext::BamRecordExtensions;
 // use num::Float;
 
 pub mod hsc_csbq;
 pub mod smc_csbq;
+pub mod models;
 
 pub static ALL_BASES: [u8; 4] = ['A' as u8, 'C' as u8, 'G' as u8, 'T' as u8];
 pub static INS: u8 = '+' as u8;
 pub static DEL: u8 = '-' as u8;
 
-/// AA 0.9  real A -> called A prob
-/// AC 0.02
-/// AG 0.02
-/// AT 0.02
-/// A- 0.02 real A -> deletion  prob
-/// A+ 0.02 real A -> insertion prob
-/// CA  ..
-/// ..
-/// A  0.25 prior
-/// C  0.25 ..
-/// G  0.25 ..
-/// T  0.25 ..
-pub struct Model {
-    refcalled2prob: HashMap<String, f32>,
-}
-
-impl Model {
-    pub fn new(fname: &str) -> Self {
-        let refcalled2prob = fs::read_to_string(fname)
-            .unwrap()
-            .split("\n")
-            .into_iter()
-            .map(|line| {
-                let (left, right) = line.trim().split_once(" ").unwrap();
-                (left.to_string(), right.parse::<f32>().unwrap())
-            })
-            .collect::<HashMap<_, _>>();
-
-        Self { refcalled2prob }
-    }
-
-    pub fn get_prob(&self, key: &str) -> f32 {
-        *self.refcalled2prob.get(key).unwrap()
-    }
-
-    pub fn get_prob_with_ref_called_base(&self, ref_base: u8, called_base: u8) -> f32 {
-        let key = unsafe { String::from_utf8_unchecked(vec![ref_base, called_base]) };
-        self.get_prob(&key)
-    }
-
-    pub fn get_prob_with_ref_base(&self, ref_base: u8) -> f32 {
-        let key = unsafe { String::from_utf8_unchecked(vec![ref_base]) };
-        self.get_prob(&key)
-    }
-}
 
 #[derive(Debug, Clone, Copy)]
 pub enum PlpState {
@@ -101,7 +61,7 @@ impl LocusInfo {
 pub fn cali_worker_for_hsc(
     recv: Receiver<AlignResult>,
     all_contig_locus_info: &mut HashMap<i32, Vec<LocusInfo>>,
-    model: &Model,
+    model: &dyn TUnigramModel,
     use_pbar: bool,
 ) -> HashMap<i32, Vec<u8>> {
     let pb = if use_pbar {
@@ -182,10 +142,6 @@ pub fn collect_plp_info_from_record(
             continue;
         }
 
-        if qpos_cursor.is_none() {
-            continue;
-        }
-
         if let Some(qpos_cursor_) = qpos_cursor {
             if qpos_cursor_ >= query_end {
                 break;
@@ -194,41 +150,39 @@ pub fn collect_plp_info_from_record(
 
         let ref_pos_cur_or_pre = rpos_cursor.unwrap() as usize;
 
-        let locus_info = unsafe { single_contig_locus_info.get_unchecked_mut(ref_pos_cur_or_pre) };
-
-        if qpos.is_none() {
-            // deletion
-            locus_info.push_plp_state(PlpState::Del);
-            continue;
-        }
-        if rpos.is_none() {
-            // ins
-            locus_info.push_plp_state(PlpState::Ins(unsafe {
-                *query_seq.get_unchecked(qpos.unwrap() as usize)
-            }));
-            continue;
-        }
-
-        unsafe {
-            if locus_info.cur_base == *query_seq.get_unchecked(qpos.unwrap() as usize) {
-                // eq
-                locus_info.push_plp_state(PlpState::Eq(
-                    *query_seq.get_unchecked(qpos.unwrap() as usize),
-                ));
+        if let Some(rpos_) = rpos {
+            let rpos_ = rpos_ as usize;
+            let locus_info = unsafe { single_contig_locus_info.get_unchecked_mut(rpos_) };
+            if let Some(qpos_) = qpos {
+                let qpos_ = qpos_ as usize;
+                unsafe {
+                    if locus_info.cur_base == *query_seq.get_unchecked(qpos_) {
+                        // eq
+                        locus_info.push_plp_state(PlpState::Eq(*query_seq.get_unchecked(qpos_)));
+                    } else {
+                        // diff
+                        locus_info.push_plp_state(PlpState::Diff(*query_seq.get_unchecked(qpos_)));
+                    }
+                }
             } else {
-                // diff
-                locus_info.push_plp_state(PlpState::Diff(
-                    *query_seq.get_unchecked(qpos.unwrap() as usize),
-                ));
+                locus_info.push_plp_state(PlpState::Del);
+            }
+        } else {
+            let qpos_ = qpos.unwrap() as usize;
+            let next_rpos = ref_pos_cur_or_pre + 1;
+            if next_rpos < ref_end as usize {
+                let locus_info = unsafe { single_contig_locus_info.get_unchecked_mut(next_rpos) };
+
+                locus_info
+                    .push_plp_state(PlpState::Ins(unsafe { *query_seq.get_unchecked(qpos_) }));
             }
         }
-        
     }
 }
 
 pub fn calibrate_single_contig_use_bayes(
     single_contig_locus_info: &Vec<LocusInfo>,
-    model: &Model,
+    model: &dyn TUnigramModel,
 ) -> Vec<u8> {
     let qual = single_contig_locus_info
         .iter()
@@ -237,7 +191,7 @@ pub fn calibrate_single_contig_use_bayes(
     qual
 }
 
-pub fn join_prob(cur_base: u8, plp_infos: &Vec<PlpState>, model: &Model) -> f32 {
+pub fn join_prob(cur_base: u8, plp_infos: &Vec<PlpState>, model: &dyn TUnigramModel,) -> f32 {
     if plp_infos.len() == 0 {
         return 1e-10;
     }
@@ -260,7 +214,7 @@ pub fn join_prob(cur_base: u8, plp_infos: &Vec<PlpState>, model: &Model) -> f32 
     value.exp()
 }
 
-pub fn single_locus_bayes(locus_info: &LocusInfo, model: &Model) -> u8 {
+pub fn single_locus_bayes(locus_info: &LocusInfo, model: &dyn TUnigramModel,) -> u8 {
     let numerator = join_prob(locus_info.cur_base, &locus_info.plp_infos, model);
     if numerator < 1e-9 {
         return 0;
@@ -289,12 +243,12 @@ pub fn single_locus_bayes(locus_info: &LocusInfo, model: &Model) -> u8 {
 
 #[cfg(test)]
 mod test {
-    use crate::{join_prob, single_locus_bayes, LocusInfo, Model, PlpState};
+    use crate::{join_prob, models::{DefaultUnigramModel, UnigramModel}, single_locus_bayes, LocusInfo, PlpState};
 
     #[test]
     fn test_join_prob() {
         let cur_base = 'A' as u8;
-        let model = Model::new("model/default.txt");
+        let model = DefaultUnigramModel{};
         let plp_infos = vec![PlpState::Eq('A' as u8), PlpState::Eq('A' as u8)];
 
         let prob = join_prob(cur_base, &plp_infos, &model);
@@ -304,7 +258,7 @@ mod test {
     #[test]
     fn test_single_locus_bayes() {
         let cur_base = 'A' as u8;
-        let model = Model::new("model/default.txt");
+        let model = UnigramModel::new("model/default.txt");
 
         let mut locus_info = LocusInfo::new(0, cur_base);
         locus_info.push_plp_state(PlpState::Eq('A' as u8));
@@ -315,8 +269,5 @@ mod test {
         locus_info.push_plp_state(PlpState::Diff('C' as u8));
         let q = single_locus_bayes(&locus_info, &model);
         assert_eq!(q, 2);
-
-
-
     }
 }

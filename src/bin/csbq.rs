@@ -8,7 +8,8 @@ use std::{
 use clap::{self, Parser};
 use csbq::{
     cali_worker_for_hsc, calibrate_single_contig_use_bayes, collect_plp_info_from_record,
-    LocusInfo, Model,
+    models::{DefaultUnigramModel, TUnigramModel, UnigramModel},
+    LocusInfo,
 };
 use gskits::{
     ds::ReadInfo,
@@ -40,8 +41,8 @@ pub struct Cli {
     pub target_file: String,
 
     /// model path
-    #[arg(long = "model")]
-    pub model_path: String,
+    #[arg(long = "model", help = "if not given, default model will be used")]
+    pub model_path: Option<String>,
 
     /// output filepath, default None, the output will be ${target}.cali.fq or  ${target}.cali.bam  
     #[arg(short = 'o')]
@@ -83,7 +84,7 @@ fn main() {
             hsc_csbq(
                 &cli.query_file,
                 &cli.target_file,
-                &cli.model_path,
+                cli.model_path.as_ref().map(|v| v.as_str()),
                 cli.threads,
                 &cli.get_output_filepath(),
             );
@@ -92,7 +93,7 @@ fn main() {
             smc_csbq(
                 &cli.query_file,
                 &cli.target_file,
-                &cli.model_path,
+                cli.model_path.as_ref().map(|v| v.as_str()),
                 cli.threads,
                 &cli.get_output_filepath(),
             );
@@ -104,7 +105,7 @@ fn main() {
 pub fn hsc_csbq(
     query_bam_file: &str,
     target_file: &str,
-    model_path: &str,
+    model_path: Option<&str>,
     threads: Option<usize>,
     output_filepath: &str,
 ) {
@@ -128,7 +129,10 @@ pub fn hsc_csbq(
 
     let aligners = build_aligner(
         "map-ont",
-        &mm2::params::IndexParams{kmer: None, wins: None},
+        &mm2::params::IndexParams {
+            kmer: None,
+            wins: None,
+        },
         &mm2::params::MapParams::default(),
         &mm2::params::AlignParams::default(),
         &mm2::params::OupParams::default(),
@@ -158,7 +162,11 @@ pub fn hsc_csbq(
         let query_files = &query_files;
         let (qs_sender, qs_recv) = crossbeam::channel::bounded(1000);
         s.spawn(move || {
-            mm2::query_seq_sender(query_files, qs_sender, &&mm2::params::InputFilterParams::default());
+            mm2::query_seq_sender(
+                query_files,
+                qs_sender,
+                &&mm2::params::InputFilterParams::default(),
+            );
         });
 
         let num_threads = threads.unwrap_or(num_cpus::get_physical());
@@ -166,13 +174,28 @@ pub fn hsc_csbq(
         for _ in 0..num_threads {
             let qs_recv_ = qs_recv.clone();
             let align_res_sender_ = align_res_sender.clone();
-            s.spawn(move || mm2::align_worker(qs_recv_, align_res_sender_, aligners, target2idx, &mm2::params::OupParams::default()));
+            s.spawn(move || {
+                mm2::align_worker(
+                    qs_recv_,
+                    align_res_sender_,
+                    aligners,
+                    target2idx,
+                    &mm2::params::OupParams::default(),
+                )
+            });
         }
         drop(qs_recv);
         drop(align_res_sender);
-        let model = Model::new(model_path);
+        
+        let model = if let Some(model_path_) = model_path {
+            Box::new(UnigramModel::new(model_path_)) as Box<dyn TUnigramModel>
+        } else {
+            Box::new(DefaultUnigramModel {}) as Box<dyn TUnigramModel>
+        };
+
+
         let calibrated_qual =
-            cali_worker_for_hsc(align_res_recv, &mut all_contig_locus_info, &model, true);
+            cali_worker_for_hsc(align_res_recv, &mut all_contig_locus_info, model.as_ref(), true);
 
         assert!(output_filepath.ends_with("fq"), "{}", output_filepath);
         let file = fs::File::open(output_filepath).unwrap();
@@ -204,7 +227,7 @@ pub fn hsc_csbq(
 fn smc_csbq(
     query_bam_file: &str,
     target_file: &str,
-    model_path: &str,
+    model_path: Option<&str>,
     threads: Option<usize>,
     output_filepath: &str,
 ) {
@@ -247,7 +270,12 @@ fn smc_csbq(
 
         let (sbr_and_smc_sender, sbr_and_smc_recv) = crossbeam::channel::bounded(1000);
         s.spawn(move || {
-            asts::subreads_and_smc_generator(sorted_sbr, sorted_smc, &mm2::params::InputFilterParams::default(), sbr_and_smc_sender);
+            asts::subreads_and_smc_generator(
+                sorted_sbr,
+                sorted_smc,
+                &mm2::params::InputFilterParams::default(),
+                sbr_and_smc_sender,
+            );
         });
 
         let threads = threads.unwrap_or(num_cpus::get_physical());
@@ -264,7 +292,11 @@ fn smc_csbq(
 
         let mut tid2cali_qual = HashMap::new();
 
-        let model = Model::new(model_path);
+        let model = if let Some(model_path_) = model_path {
+            Box::new(UnigramModel::new(model_path_)) as Box<dyn TUnigramModel>
+        } else {
+            Box::new(DefaultUnigramModel {}) as Box<dyn TUnigramModel>
+        };
 
         let pb = pbar::get_spin_pb("do calibration".to_string(), pbar::DEFAULT_INTERVAL);
 
@@ -286,7 +318,7 @@ fn smc_csbq(
                 collect_plp_info_from_record(record, &mut smc_read_locus_info);
             }
 
-            let qual = calibrate_single_contig_use_bayes(&smc_read_locus_info, &model);
+            let qual = calibrate_single_contig_use_bayes(&smc_read_locus_info, model.as_ref());
             tid2cali_qual.insert(tid, qual);
         }
         pb.finish();
@@ -335,7 +367,12 @@ fn smc_csbq(
             let qual = smc_name2cali_qual.get(&qname).unwrap();
             record.set(qname.as_bytes(), None, seq.as_bytes(), qual);
             record.remove_aux(b"rq").unwrap();
-            record.push_aux(b"rq", rust_htslib::bam::record::Aux::Float(baseq2channelq(&qual))).unwrap();
+            record
+                .push_aux(
+                    b"rq",
+                    rust_htslib::bam::record::Aux::Float(baseq2channelq(&qual)),
+                )
+                .unwrap();
             o_bam_file.write(&record).unwrap();
         }
         pb.finish();
