@@ -100,6 +100,7 @@ pub trait TModel {
 
         numerator / denominator
     }
+
 }
 
 // pub struct UnigramModel {
@@ -211,10 +212,10 @@ impl TriGramModel {
 impl TModel for TriGramModel {
     fn get_prob_with_ref_called_base(&self, ref_ctx_enc: u8, op: PlpState) -> f32 {
         let key = match op {
-            PlpState::Eq(base) | PlpState::Diff(base) => {
-                format!("{}->{}", ref_ctx_enc, encode_single_base(base))
+            PlpState::Eq(base_enc) | PlpState::Diff(base_enc) => {
+                format!("{}->{}", ref_ctx_enc, base_enc)
             }
-            PlpState::Ins(base) => format!("{}->+{}", ref_ctx_enc, encode_single_base(base)),
+            PlpState::Ins(base_enc) => format!("{}->+{}", ref_ctx_enc, base_enc),
             PlpState::Del => format!("{}", ref_ctx_enc),
         };
 

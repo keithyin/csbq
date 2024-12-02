@@ -1,4 +1,9 @@
-use std::{cmp, collections::HashMap};
+use std::{
+    cmp,
+    collections::HashMap,
+    fs::File,
+    io::{BufWriter, Write},
+};
 
 use crossbeam::channel::Receiver;
 use gskits::{
@@ -194,10 +199,14 @@ pub fn collect_plp_info_from_record(
                 unsafe {
                     if locus_info.base_ctx_enc == *query_seq.get_unchecked(qpos_) {
                         // eq
-                        locus_info.push_plp_state(PlpState::Eq(*query_seq.get_unchecked(qpos_)));
+                        locus_info.push_plp_state(PlpState::Eq(encode_single_base(
+                            *query_seq.get_unchecked(qpos_),
+                        )));
                     } else {
                         // diff
-                        locus_info.push_plp_state(PlpState::Diff(*query_seq.get_unchecked(qpos_)));
+                        locus_info.push_plp_state(PlpState::Diff(encode_single_base(
+                            *query_seq.get_unchecked(qpos_),
+                        )));
                     }
                 }
             } else {
@@ -211,8 +220,9 @@ pub fn collect_plp_info_from_record(
             if next_rpos < ref_end as usize {
                 let locus_info = unsafe { single_contig_locus_info.get_unchecked_mut(next_rpos) };
 
-                locus_info
-                    .push_plp_state(PlpState::Ins(unsafe { *query_seq.get_unchecked(qpos_) }));
+                locus_info.push_plp_state(PlpState::Ins(unsafe {
+                    encode_single_base(*query_seq.get_unchecked(qpos_))
+                }));
             }
         }
     }
@@ -228,6 +238,25 @@ pub fn calibrate_single_contig_use_bayes(
         .map(|prob| (-10. * (1. - prob).log10()).round() as u8)
         .collect::<Vec<_>>();
     qual
+}
+
+/// used for train model
+/// csv header is ctx_enc   base_enc    op
+pub fn dump_locus_infos(locus_infos: &Vec<LocusInfo>, writer: &mut BufWriter<File>) {
+    locus_infos.iter().for_each(|locus_info| {
+        locus_info
+            .plp_infos
+            .iter()
+            .for_each(|&plp_info| match plp_info {
+                PlpState::Eq(base_enc) | PlpState::Diff(base_enc) => {
+                    writeln!(writer, "{}\t{}\tM", locus_info.base_ctx_enc, base_enc).unwrap()
+                }
+                PlpState::Ins(base_enc) => {
+                    writeln!(writer, "{}\t{}\tI", locus_info.base_ctx_enc, base_enc).unwrap()
+                }
+                PlpState::Del => writeln!(writer, "{}\t\tD", locus_info.base_ctx_enc).unwrap(),
+            });
+    });
 }
 
 #[cfg(test)]
@@ -264,7 +293,6 @@ mod test {
 
     #[test]
     fn test_encode_base_ctx() {
-
         let enc = encode_base_ctx(b"ACG");
         assert_eq!(enc, 6);
         let decoded = decode_base_ctx(enc, 3);
@@ -274,6 +302,5 @@ mod test {
         assert_eq!(enc, 63);
         let decoded = decode_base_ctx(enc, 3);
         assert_eq!(&decoded, "TTT");
-
     }
 }
