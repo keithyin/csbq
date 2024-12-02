@@ -8,7 +8,7 @@ use std::{
 use clap::{self, Parser};
 use csbq::{
     cali_worker_for_hsc, calibrate_single_contig_use_bayes, collect_plp_info_from_record,
-    models::{DefaultUnigramModel, TUnigramModel, UnigramModel},
+    models::{DefaultUnigramModel, TModel, UnigramModel},
     LocusInfo,
 };
 use gskits::{
@@ -150,7 +150,7 @@ pub fn hsc_csbq(
                     .iter()
                     .copied()
                     .enumerate()
-                    .map(|(pos, base)| LocusInfo::new(pos, base))
+                    .map(|(pos, base)| LocusInfo::new(pos, &vec![base]))
                     .collect::<Vec<_>>(),
             )
         })
@@ -188,9 +188,9 @@ pub fn hsc_csbq(
         drop(align_res_sender);
         
         let model = if let Some(model_path_) = model_path {
-            Box::new(UnigramModel::new(model_path_)) as Box<dyn TUnigramModel>
+            Box::new(UnigramModel::new(model_path_)) as Box<dyn TModel>
         } else {
-            Box::new(DefaultUnigramModel {}) as Box<dyn TUnigramModel>
+            Box::new(DefaultUnigramModel {}) as Box<dyn TModel>
         };
 
 
@@ -293,9 +293,9 @@ fn smc_csbq(
         let mut tid2cali_qual = HashMap::new();
 
         let model = if let Some(model_path_) = model_path {
-            Box::new(UnigramModel::new(model_path_)) as Box<dyn TUnigramModel>
+            Box::new(UnigramModel::new(model_path_)) as Box<dyn TModel>
         } else {
-            Box::new(DefaultUnigramModel {}) as Box<dyn TUnigramModel>
+            Box::new(DefaultUnigramModel {}) as Box<dyn TModel>
         };
 
         let pb = pbar::get_spin_pb("do calibration".to_string(), pbar::DEFAULT_INTERVAL);

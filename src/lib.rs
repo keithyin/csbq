@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{cmp, collections::HashMap};
 
 use crossbeam::channel::Receiver;
 use gskits::{
@@ -6,18 +6,51 @@ use gskits::{
     pbar,
 };
 use mm2::AlignResult;
-use models::TUnigramModel;
+use models::TModel;
 use rust_htslib::bam::ext::BamRecordExtensions;
 // use num::Float;
 
 pub mod hsc_csbq;
-pub mod smc_csbq;
 pub mod models;
+pub mod smc_csbq;
 
 pub static ALL_BASES: [u8; 4] = ['A' as u8, 'C' as u8, 'G' as u8, 'T' as u8];
 pub static INS: u8 = '+' as u8;
 pub static DEL: u8 = '-' as u8;
 
+pub const DNA_SEQ_ASCII2IDX: [u8; 128] = [
+    4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
+    4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
+    4, 0, 4, 1, 4, 4, 4, 2, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 3, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
+    4, 0, 4, 1, 4, 4, 4, 2, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 3, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
+];
+
+pub fn encode_base_ctx(bases: &[u8]) -> u8 {
+    assert!(bases.len() <= 4);
+
+    let mut base_ctx_enc = 0;
+    bases.iter().for_each(|v| {
+        let single = encode_single_base(*v);
+        base_ctx_enc <<= 2;
+        base_ctx_enc += single;
+    });
+    base_ctx_enc
+}
+
+pub fn encode_single_base(base: u8) -> u8 {
+    unsafe { *DNA_SEQ_ASCII2IDX.get_unchecked(base as usize) }
+}
+
+pub fn decode_base_ctx(mut enc: u8, mut ctx_len: usize) -> String {
+    let mut stack = vec![];
+    while ctx_len > 0 {
+        let v = enc & 0b11;
+        stack.push(ALL_BASES[v as usize]);
+        enc >>= 2;
+        ctx_len -= 1;
+    }
+    unsafe { String::from_utf8_unchecked(stack.into_iter().rev().collect()) }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub enum PlpState {
@@ -28,15 +61,17 @@ pub enum PlpState {
 }
 pub struct LocusInfo {
     pos: usize,
-    cur_base: u8,
+    ctx_len: u8,
+    base_ctx_enc: u8,
     plp_infos: Vec<PlpState>,
 }
 
 impl LocusInfo {
-    pub fn new(pos: usize, base: u8) -> Self {
+    pub fn new(pos: usize, bases: &[u8]) -> Self {
         Self {
             pos,
-            cur_base: base,
+            ctx_len: bases.len() as u8,
+            base_ctx_enc: encode_base_ctx(bases),
             plp_infos: vec![],
         }
     }
@@ -45,11 +80,11 @@ impl LocusInfo {
         self.plp_infos.push(plp_state);
     }
 
-    pub fn get_other_bases(&self) -> Vec<u8> {
-        ALL_BASES
-            .iter()
-            .copied()
-            .filter(|base| *base != self.cur_base)
+    pub fn get_other_choices(&self) -> Vec<u8> {
+        let tot_choices = 2_u32.pow(self.ctx_len as u32);
+        (0..tot_choices as u8)
+            .into_iter()
+            .filter(|v| *v != self.base_ctx_enc)
             .collect()
     }
 
@@ -61,7 +96,7 @@ impl LocusInfo {
 pub fn cali_worker_for_hsc(
     recv: Receiver<AlignResult>,
     all_contig_locus_info: &mut HashMap<i32, Vec<LocusInfo>>,
-    model: &dyn TUnigramModel,
+    model: &dyn TModel,
     use_pbar: bool,
 ) -> HashMap<i32, Vec<u8>> {
     let pb = if use_pbar {
@@ -78,7 +113,7 @@ pub fn cali_worker_for_hsc(
         for record in align_res.records {
             let tid = record.tid();
             let single_contig_locus_info = all_contig_locus_info.get_mut(&tid).unwrap();
-            collect_plp_info_from_record(&record, single_contig_locus_info);
+            collect_plp_info_from_record(&record, single_contig_locus_info, model);
         }
     }
     pb.as_ref().map(|pb_| pb_.finish());
@@ -107,6 +142,7 @@ pub fn cali_worker_for_hsc(
 pub fn collect_plp_info_from_record(
     record: &BamRecord,
     single_contig_locus_info: &mut Vec<LocusInfo>,
+    model: &dyn TModel,
 ) {
     if record.is_secondary() || record.is_unmapped() || record.is_supplementary() {
         return;
@@ -156,7 +192,7 @@ pub fn collect_plp_info_from_record(
             if let Some(qpos_) = qpos {
                 let qpos_ = qpos_ as usize;
                 unsafe {
-                    if locus_info.cur_base == *query_seq.get_unchecked(qpos_) {
+                    if locus_info.base_ctx_enc == *query_seq.get_unchecked(qpos_) {
                         // eq
                         locus_info.push_plp_state(PlpState::Eq(*query_seq.get_unchecked(qpos_)));
                     } else {
@@ -168,8 +204,10 @@ pub fn collect_plp_info_from_record(
                 locus_info.push_plp_state(PlpState::Del);
             }
         } else {
+            // for insertion
             let qpos_ = qpos.unwrap() as usize;
-            let next_rpos = ref_pos_cur_or_pre + 1;
+            let next_rpos = ref_pos_cur_or_pre as i64 + model.shift_position_for_insertion();
+            let next_rpos = cmp::max(0, next_rpos) as usize;
             if next_rpos < ref_end as usize {
                 let locus_info = unsafe { single_contig_locus_info.get_unchecked_mut(next_rpos) };
 
@@ -182,92 +220,60 @@ pub fn collect_plp_info_from_record(
 
 pub fn calibrate_single_contig_use_bayes(
     single_contig_locus_info: &Vec<LocusInfo>,
-    model: &dyn TUnigramModel,
+    model: &dyn TModel,
 ) -> Vec<u8> {
     let qual = single_contig_locus_info
         .iter()
-        .map(|locus_info| single_locus_bayes(locus_info, model))
+        .map(|locus_info| model.locus_posterior_prob(locus_info))
+        .map(|prob| (-10. * (1. - prob).log10()).round() as u8)
         .collect::<Vec<_>>();
     qual
 }
 
-pub fn join_prob(cur_base: u8, plp_infos: &Vec<PlpState>, model: &dyn TUnigramModel,) -> f32 {
-    if plp_infos.len() == 0 {
-        return 1e-10;
-    }
-    let value = plp_infos
-        .iter()
-        .map(|plp_state| match *plp_state {
-            PlpState::Eq(called_base) => model
-                .get_prob_with_ref_called_base(cur_base, called_base)
-                .ln(),
-            PlpState::Diff(called_base) => model
-                .get_prob_with_ref_called_base(cur_base, called_base)
-                .ln(),
-            PlpState::Ins(_) => model.get_prob_with_ref_called_base(cur_base, INS).ln(),
-            PlpState::Del => model.get_prob_with_ref_called_base(cur_base, DEL).ln(),
-        })
-        .reduce(|acc, cur| acc + cur)
-        .unwrap()
-        + model.get_prob_with_ref_base(cur_base).ln();
-
-    value.exp()
-}
-
-pub fn single_locus_bayes(locus_info: &LocusInfo, model: &dyn TUnigramModel,) -> u8 {
-    let numerator = join_prob(locus_info.cur_base, &locus_info.plp_infos, model);
-    if numerator < 1e-9 {
-        return 0;
-    }
-    let denominator = ALL_BASES
-        .into_iter()
-        .map(|cur_base| join_prob(cur_base, &locus_info.plp_infos, model))
-        .reduce(|acc, v| {
-            // println!("{}", v);
-            acc + v
-        })
-        .unwrap();
-
-    let mut posterior = numerator / denominator;
-    // println!("{}/{} = {}", numerator, denominator, posterior);
-
-    posterior = if posterior > (1. - 1e-5) {
-        1. - 1e-5
-    } else {
-        posterior
-    };
-
-    let phreq = (-10. * (1. - posterior).log10()) as u8;
-    phreq
-}
-
 #[cfg(test)]
 mod test {
-    use crate::{join_prob, models::{DefaultUnigramModel, UnigramModel}, single_locus_bayes, LocusInfo, PlpState};
+    // use crate::{single_locus_bayes, LocusInfo, PlpState};
+
+    // #[test]
+    // fn test_join_prob() {
+    //     let cur_base = 'A' as u8;
+    //     let model = DefaultUnigramModel {};
+    //     let plp_infos = vec![PlpState::Eq('A' as u8), PlpState::Eq('A' as u8)];
+
+    //     let prob = join_prob(cur_base, &plp_infos, &model);
+    //     assert!((prob - 0.2025).abs() < 1e-4);
+    // }
+
+    // #[test]
+    // fn test_single_locus_bayes() {
+    //     let cur_base = 'A' as u8;
+    //     let model = UnigramModel::new("model/default.txt");
+
+    //     let mut locus_info = LocusInfo::new(0, &vec![cur_base]);
+    //     locus_info.push_plp_state(PlpState::Eq('A' as u8));
+
+    //     let q = single_locus_bayes(&locus_info, &model);
+    //     assert_eq!(q, 12);
+
+    //     locus_info.push_plp_state(PlpState::Diff('C' as u8));
+    //     let q = single_locus_bayes(&locus_info, &model);
+    //     assert_eq!(q, 2);
+    // }
+
+    use crate::{decode_base_ctx, encode_base_ctx};
 
     #[test]
-    fn test_join_prob() {
-        let cur_base = 'A' as u8;
-        let model = DefaultUnigramModel{};
-        let plp_infos = vec![PlpState::Eq('A' as u8), PlpState::Eq('A' as u8)];
+    fn test_encode_base_ctx() {
 
-        let prob = join_prob(cur_base, &plp_infos, &model);
-        assert!((prob - 0.2025).abs() < 1e-4);
-    }
+        let enc = encode_base_ctx(b"ACG");
+        assert_eq!(enc, 6);
+        let decoded = decode_base_ctx(enc, 3);
+        assert_eq!(&decoded, "ACG");
 
-    #[test]
-    fn test_single_locus_bayes() {
-        let cur_base = 'A' as u8;
-        let model = UnigramModel::new("model/default.txt");
+        let enc = encode_base_ctx(b"TTT");
+        assert_eq!(enc, 63);
+        let decoded = decode_base_ctx(enc, 3);
+        assert_eq!(&decoded, "TTT");
 
-        let mut locus_info = LocusInfo::new(0, cur_base);
-        locus_info.push_plp_state(PlpState::Eq('A' as u8));
-
-        let q = single_locus_bayes(&locus_info, &model);
-        assert_eq!(q, 12);
-
-        locus_info.push_plp_state(PlpState::Diff('C' as u8));
-        let q = single_locus_bayes(&locus_info, &model);
-        assert_eq!(q, 2);
     }
 }
