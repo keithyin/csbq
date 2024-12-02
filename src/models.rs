@@ -100,7 +100,6 @@ pub trait TModel {
 
         numerator / denominator
     }
-
 }
 
 // pub struct UnigramModel {
@@ -192,9 +191,15 @@ impl TriGramModel {
             .into_iter()
             .map(|line| {
                 let line = line.replace(" ", "");
-                let (left, right) = line.trim().split_once("=").unwrap();
-                (left.to_string(), right.parse::<f32>().unwrap())
+                if line.starts_with("##") || !line.contains("=") {
+                    None
+                } else {
+                    let (left, right) = line.trim().split_once("=").unwrap();
+                    Some((left.to_string(), right.parse::<f32>().unwrap()))
+                }
             })
+            .filter(|v| v.is_some())
+            .map(|v| v.unwrap())
             .collect::<HashMap<_, _>>();
 
         Self {
