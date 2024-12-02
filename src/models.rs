@@ -1,6 +1,6 @@
 use std::{collections::HashMap, fs};
 
-use crate::{encode_single_base, LocusInfo, PlpState};
+use crate::{LocusInfo, PlpState};
 
 pub trait TModel {
     fn get_prob_with_ref_called_base(&self, ref_ctx_enc: u8, op: PlpState) -> f32;

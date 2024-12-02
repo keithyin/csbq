@@ -8,7 +8,8 @@ use std::{
 use clap::{self, Parser};
 use csbq::{
     cali_worker_for_hsc, calibrate_single_contig_use_bayes, collect_plp_info_from_record,
-    models::{DefaultUnigramModel, TModel, UnigramModel},
+    collect_plp_worker, dump_locus_infos,
+    models::{TModel, TriGramModel},
     LocusInfo,
 };
 use gskits::{
@@ -29,7 +30,7 @@ pub struct Cli {
     #[arg(long = "threads")]
     pub threads: Option<usize>,
 
-    #[arg(long = "mode", help = "smc/hsc")]
+    #[arg(long = "mode", help = "smc/hsc/train")]
     pub mode: String,
 
     /// query file path
@@ -54,7 +55,12 @@ impl Cli {
         if let Some(oup_) = &self.output_filepath {
             oup_.to_string()
         } else {
-            if self.target_file.ends_with(".bam") {
+            if self.mode.eq("train") {
+                format!(
+                    "{}.csbq.train.csv",
+                    self.target_file.rsplit_once(".").unwrap().0
+                )
+            } else if self.target_file.ends_with(".bam") {
                 format!("{}.cali.bam", self.target_file.rsplit_once(".").unwrap().0)
             } else {
                 format!("{}.cali.fq", self.target_file.rsplit_once(".").unwrap().0)
@@ -80,13 +86,14 @@ fn main() {
     let cli = Cli::parse();
 
     match cli.mode.as_str() {
-        "hsc" => {
+        "hsc" | "train" => {
             hsc_csbq(
                 &cli.query_file,
                 &cli.target_file,
                 cli.model_path.as_ref().map(|v| v.as_str()),
                 cli.threads,
                 &cli.get_output_filepath(),
+                cli.mode.eq("train"),
             );
         }
         "smc" => {
@@ -108,6 +115,7 @@ pub fn hsc_csbq(
     model_path: Option<&str>,
     threads: Option<usize>,
     output_filepath: &str,
+    dump_train_data: bool,
 ) {
     let targets = match fastx_file_fmt(target_file).unwrap() {
         FastxFile::Fasta => {
@@ -186,41 +194,69 @@ pub fn hsc_csbq(
         }
         drop(qs_recv);
         drop(align_res_sender);
-        
-        let model = if let Some(model_path_) = model_path {
-            Box::new(UnigramModel::new(model_path_)) as Box<dyn TModel>
+        let model = if dump_train_data {
+            Box::new(TriGramModel::new_empty()) as Box<dyn TModel>
         } else {
-            Box::new(DefaultUnigramModel {}) as Box<dyn TModel>
+            Box::new(TriGramModel::new(
+                model_path.as_ref().expect("--model needed"),
+            )) as Box<dyn TModel>
         };
 
+        // let model = if let Some(model_path_) = model_path {
+        //     Box::new(UnigramModel::new(model_path_)) as Box<dyn TModel>
+        // } else {
+        //     Box::new(DefaultUnigramModel {}) as Box<dyn TModel>
+        // };
 
-        let calibrated_qual =
-            cali_worker_for_hsc(align_res_recv, &mut all_contig_locus_info, model.as_ref(), true);
-
-        assert!(output_filepath.ends_with("fq"), "{}", output_filepath);
+        assert!(
+            output_filepath.ends_with("fq") || output_filepath.ends_with("csv"),
+            "{}",
+            output_filepath
+        );
         let file = fs::File::open(output_filepath).unwrap();
         let mut buf_writer = BufWriter::new(file);
 
-        let pb = pbar::get_spin_pb(
-            format!("dump result to {}", output_filepath),
-            pbar::DEFAULT_INTERVAL,
-        );
-
-        targets.iter().enumerate().for_each(|(tid, target)| {
-            pb.inc(1);
-            let tid = tid as i32;
-            let name = &target.name;
-            let seq = &target.seq;
-            let qual = calibrated_qual
-                .get(&tid)
-                .unwrap()
+        if dump_train_data {
+            writeln!(&mut buf_writer, "ref_base_ctx_enc\tbase_enc\top").unwrap();
+            collect_plp_worker(
+                align_res_recv,
+                &mut all_contig_locus_info,
+                model.as_ref(),
+                true,
+            );
+            all_contig_locus_info
                 .iter()
-                .map(|q| *q + 33)
-                .collect::<Vec<_>>();
-            let qual_str = unsafe { String::from_utf8_unchecked(qual) };
-            writeln!(&mut buf_writer, "@{}\n{}\n+\n{}", name, seq, qual_str).unwrap();
-        });
-        pb.finish();
+                .for_each(|(_, locus_infos)| dump_locus_infos(locus_infos, &mut buf_writer));
+            
+        } else {
+            let calibrated_qual = cali_worker_for_hsc(
+                align_res_recv,
+                &mut all_contig_locus_info,
+                model.as_ref(),
+                true,
+            );
+
+            let pb = pbar::get_spin_pb(
+                format!("dump result to {}", output_filepath),
+                pbar::DEFAULT_INTERVAL,
+            );
+
+            targets.iter().enumerate().for_each(|(tid, target)| {
+                pb.inc(1);
+                let tid = tid as i32;
+                let name = &target.name;
+                let seq = &target.seq;
+                let qual = calibrated_qual
+                    .get(&tid)
+                    .unwrap()
+                    .iter()
+                    .map(|q| *q + 33)
+                    .collect::<Vec<_>>();
+                let qual_str = unsafe { String::from_utf8_unchecked(qual) };
+                writeln!(&mut buf_writer, "@{}\n{}\n+\n{}", name, seq, qual_str).unwrap();
+            });
+            pb.finish();
+        }
     });
 }
 
@@ -292,11 +328,9 @@ fn smc_csbq(
 
         let mut tid2cali_qual = HashMap::new();
 
-        let model = if let Some(model_path_) = model_path {
-            Box::new(UnigramModel::new(model_path_)) as Box<dyn TModel>
-        } else {
-            Box::new(DefaultUnigramModel {}) as Box<dyn TModel>
-        };
+        let model = Box::new(TriGramModel::new(
+            model_path.as_ref().expect("--model needed"),
+        )) as Box<dyn TModel>;
 
         let pb = pbar::get_spin_pb("do calibration".to_string(), pbar::DEFAULT_INTERVAL);
 
@@ -309,13 +343,10 @@ fn smc_csbq(
 
             let smc_read = idx2target_seq.get(&(tid as usize)).unwrap().as_bytes();
 
-            let mut smc_read_locus_info = (0..smc_read.len())
-                .into_iter()
-                .map(|pos| LocusInfo::new(pos, unsafe { *smc_read.get_unchecked(pos) }))
-                .collect::<Vec<LocusInfo>>();
+            let mut smc_read_locus_info = model.init_locus_info(smc_read);
 
             for record in &single_channel_align_res.records {
-                collect_plp_info_from_record(record, &mut smc_read_locus_info);
+                collect_plp_info_from_record(record, &mut smc_read_locus_info, model.as_ref());
             }
 
             let qual = calibrate_single_contig_use_bayes(&smc_read_locus_info, model.as_ref());

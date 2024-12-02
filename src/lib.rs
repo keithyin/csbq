@@ -98,12 +98,12 @@ impl LocusInfo {
     }
 }
 
-pub fn cali_worker_for_hsc(
+pub fn collect_plp_worker(
     recv: Receiver<AlignResult>,
     all_contig_locus_info: &mut HashMap<i32, Vec<LocusInfo>>,
     model: &dyn TModel,
     use_pbar: bool,
-) -> HashMap<i32, Vec<u8>> {
+) {
     let pb = if use_pbar {
         Some(pbar::get_spin_pb(
             "collect plp info".to_string(),
@@ -122,6 +122,18 @@ pub fn cali_worker_for_hsc(
         }
     }
     pb.as_ref().map(|pb_| pb_.finish());
+
+}
+
+pub fn cali_worker_for_hsc(
+    recv: Receiver<AlignResult>,
+    all_contig_locus_info: &mut HashMap<i32, Vec<LocusInfo>>,
+    model: &dyn TModel,
+    use_pbar: bool,
+) -> HashMap<i32, Vec<u8>> {
+
+
+    collect_plp_worker(recv, all_contig_locus_info, model, use_pbar);
 
     let pb = if use_pbar {
         Some(pbar::get_spin_pb(
