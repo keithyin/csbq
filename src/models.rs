@@ -176,7 +176,7 @@ pub trait TModel {
 
 /// 0->0=0.5 means AAA -> A 0.5
 /// 0->1=0.3 means AAA -> C 0.3
-/// 0=0.1 means AAA -> deletion 0.3
+/// 0->=0.1 means AAA -> deletion 0.3
 /// 0->+0=0.4 means AAA -> ins A 0.4
 /// 1->0=0.4 means AAC-> C 0.4
 pub struct TriGramModel {
@@ -221,7 +221,7 @@ impl TModel for TriGramModel {
                 format!("{}->{}", ref_ctx_enc, base_enc)
             }
             PlpState::Ins(base_enc) => format!("{}->+{}", ref_ctx_enc, base_enc),
-            PlpState::Del => format!("{}", ref_ctx_enc),
+            PlpState::Del => format!("{}->", ref_ctx_enc),
         };
 
         *self.refcalled2prob.get(&key).unwrap()
