@@ -57,36 +57,46 @@ pub fn decode_base_ctx(mut enc: u8, mut ctx_len: usize) -> String {
     unsafe { String::from_utf8_unchecked(stack.into_iter().rev().collect()) }
 }
 
-#[derive(Debug, Clone, Copy)]
-pub enum PlpState {
-    Eq(u8),
-    Diff(u8), // diff and the difference base
-    Del,
-    Ins(u8), // insertion base
-}
 pub struct LocusInfo {
     pos: usize,
     ctx_len: u8,
     base_ctx_enc: u8,
-    plp_infos: Vec<PlpState>,
+    // base: u8,
+    base_enc: u8,
+    match_cnt: [usize; 4], // eq and diff are match
+    del_cnt: usize,
+    ins_cnt: [usize; 4],
 }
 
 impl LocusInfo {
-    pub fn new(pos: usize, bases: &[u8]) -> Self {
+    pub fn new(pos: usize, base_ctx: &[u8], base: u8) -> Self {
         Self {
             pos,
-            ctx_len: bases.len() as u8,
-            base_ctx_enc: encode_base_ctx(bases),
-            plp_infos: vec![],
+            ctx_len: base_ctx.len() as u8,
+            base_ctx_enc: encode_base_ctx(base_ctx),
+            // base: base,
+
+            base_enc: encode_single_base(base),
+            del_cnt: 0,
+            match_cnt: [0, 0, 0, 0],
+            ins_cnt: [0, 0, 0, 0],
         }
     }
 
-    pub fn push_plp_state(&mut self, plp_state: PlpState) {
-        self.plp_infos.push(plp_state);
+    pub fn add_del(&mut self) {
+        self.del_cnt += 1;
+    }
+
+    pub fn add_match(&mut self, base: u8) {
+        self.match_cnt[encode_single_base(base) as usize] += 1;
+    }
+
+    pub fn add_ins(&mut self, base: u8) {
+        self.ins_cnt[encode_single_base(base) as usize] += 1;
     }
 
     pub fn get_other_choices(&self) -> Vec<u8> {
-        let tot_choices = 2_u32.pow(self.ctx_len as u32);
+        let tot_choices = 4_u32.pow(self.ctx_len as u32);
         (0..tot_choices as u8)
             .into_iter()
             .filter(|v| *v != self.base_ctx_enc)
@@ -122,7 +132,6 @@ pub fn collect_plp_worker(
         }
     }
     pb.as_ref().map(|pb_| pb_.finish());
-
 }
 
 pub fn cali_worker_for_hsc(
@@ -131,8 +140,6 @@ pub fn cali_worker_for_hsc(
     model: &dyn TModel,
     use_pbar: bool,
 ) -> HashMap<i32, Vec<u8>> {
-
-
     collect_plp_worker(recv, all_contig_locus_info, model, use_pbar);
 
     let pb = if use_pbar {
@@ -209,20 +216,10 @@ pub fn collect_plp_info_from_record(
             if let Some(qpos_) = qpos {
                 let qpos_ = qpos_ as usize;
                 unsafe {
-                    if locus_info.base_ctx_enc == *query_seq.get_unchecked(qpos_) {
-                        // eq
-                        locus_info.push_plp_state(PlpState::Eq(encode_single_base(
-                            *query_seq.get_unchecked(qpos_),
-                        )));
-                    } else {
-                        // diff
-                        locus_info.push_plp_state(PlpState::Diff(encode_single_base(
-                            *query_seq.get_unchecked(qpos_),
-                        )));
-                    }
+                    locus_info.add_match(*query_seq.get_unchecked(qpos_));
                 }
             } else {
-                locus_info.push_plp_state(PlpState::Del);
+                locus_info.add_del();
             }
         } else {
             // for insertion
@@ -232,9 +229,7 @@ pub fn collect_plp_info_from_record(
             if next_rpos < ref_end as usize {
                 let locus_info = unsafe { single_contig_locus_info.get_unchecked_mut(next_rpos) };
 
-                locus_info.push_plp_state(PlpState::Ins(unsafe {
-                    encode_single_base(*query_seq.get_unchecked(qpos_))
-                }));
+                locus_info.add_ins(unsafe { *query_seq.get_unchecked(qpos_) });
             }
         }
     }
@@ -257,16 +252,37 @@ pub fn calibrate_single_contig_use_bayes(
 pub fn dump_locus_infos(locus_infos: &Vec<LocusInfo>, writer: &mut BufWriter<File>) {
     locus_infos.iter().for_each(|locus_info| {
         locus_info
-            .plp_infos
+            .match_cnt
             .iter()
-            .for_each(|&plp_info| match plp_info {
-                PlpState::Eq(base_enc) | PlpState::Diff(base_enc) => {
-                    writeln!(writer, "{}\t{}\tM", locus_info.base_ctx_enc, base_enc).unwrap()
-                }
-                PlpState::Ins(base_enc) => {
-                    writeln!(writer, "{}\t{}\tI", locus_info.base_ctx_enc, base_enc).unwrap()
-                }
-                PlpState::Del => writeln!(writer, "{}\t\tD", locus_info.base_ctx_enc).unwrap(),
+            .enumerate()
+            .for_each(|(called_base_enc, &cnt)| {
+                writeln!(
+                    writer,
+                    "{}\t{}\t{}\tM",
+                    locus_info.base_ctx_enc, called_base_enc, cnt
+                )
+                .unwrap();
+            });
+
+        // del
+        writeln!(
+            writer,
+            "{}\t{}\t{}\tD",
+            locus_info.base_ctx_enc, "", locus_info.del_cnt
+        )
+        .unwrap();
+
+        locus_info
+            .ins_cnt
+            .iter()
+            .enumerate()
+            .for_each(|(base_enc, cnt)| {
+                writeln!(
+                    writer,
+                    "{}\t{}\t{}\tI",
+                    locus_info.base_ctx_enc, base_enc, cnt
+                )
+                .unwrap();
             });
     });
 }

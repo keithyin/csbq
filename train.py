@@ -7,7 +7,7 @@ def train(fname: str):
 
     df = (
         df.group_by(["ref_base_ctx_enc", "base_enc", "op"])
-        .agg([pl.len().alias("cnt")])
+        .agg([pl.col("cnt").sum()])
         .with_columns(
             [
                 (

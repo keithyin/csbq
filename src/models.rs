@@ -1,14 +1,29 @@
 use std::{collections::HashMap, fs};
 
-use crate::{LocusInfo, PlpState};
+use crate::{decode_base_ctx, LocusInfo};
 
-pub trait TModel {
-    fn get_prob_with_ref_called_base(&self, ref_ctx_enc: u8, op: PlpState) -> f32;
+#[derive(Debug, Clone, Copy)]
+pub enum CigarOp {
+    Eq,
+    Diff, // diff and the difference base
+    Match,
+    Del,
+    Ins, // insertion base
+}
+
+pub trait TModel: Sync + Send {
+    fn get_prob_with_ref_called_base(
+        &self,
+        ref_ctx_enc: u8,
+        called_base_enc: u8,
+        cigar_op: CigarOp,
+    ) -> f32;
 
     fn get_prob_with_ref_base(&self, _ref_ctx_enc: u8) -> f32 {
-        let num_choices = 2_u32.pow(self.get_ctx_len() as u32);
+        // let num_choices = 4_u32.pow(self.get_ctx_len() as u32);
 
-        1.0 / num_choices as f32
+        // 1.0 / num_choices as f32
+        0.25
     }
 
     fn init_locus_info(&self, ref_seq: &[u8]) -> Vec<LocusInfo> {
@@ -19,7 +34,7 @@ pub trait TModel {
                 .iter()
                 .enumerate()
                 .into_iter()
-                .map(|(pos, &base)| LocusInfo::new(pos, &vec![base]))
+                .map(|(pos, &base)| LocusInfo::new(pos, &vec![base], base))
                 .collect(),
 
             2 => ref_seq
@@ -32,7 +47,7 @@ pub trait TModel {
                     } else {
                         unsafe { *ref_seq.get_unchecked(pos + 1) }
                     };
-                    LocusInfo::new(pos, &vec![base, next_base])
+                    LocusInfo::new(pos, &vec![base, next_base], base)
                 })
                 .collect(),
 
@@ -52,7 +67,7 @@ pub trait TModel {
                         unsafe { *ref_seq.get_unchecked(pos + 1) }
                     };
 
-                    LocusInfo::new(pos, &vec![pre_base, base, next_base])
+                    LocusInfo::new(pos, &vec![pre_base, base, next_base], base)
                 })
                 .collect(),
 
@@ -74,32 +89,80 @@ pub trait TModel {
     }
 
     fn locus_posterior_prob(&self, locus: &LocusInfo) -> f32 {
-        if locus.plp_infos.len() == 0 {
-            return 1e-10;
-        }
-
-        let join_prob = |ref_ctx_enc: u8, plp_states: &Vec<PlpState>| -> f32 {
-            let v = plp_states
+        let join_prob = |base_ctx_enc, locus_info: &LocusInfo| -> f32 {
+            // match
+            let mut ln_prob = locus_info
+                .match_cnt
                 .iter()
-                .map(|plp_state| {
-                    self.get_prob_with_ref_called_base(ref_ctx_enc, *plp_state)
-                        .ln()
+                .enumerate()
+                .map(|(called_base_enc, &cnt)| {
+                    // print!("cnt: {} , ", cnt);
+                    cnt as f32
+                        * self
+                            .get_prob_with_ref_called_base(
+                                base_ctx_enc,
+                                called_base_enc as u8,
+                                CigarOp::Match,
+                            )
+                            .ln()
                 })
-                .sum::<f32>()
-                + self.get_prob_with_ref_base(locus.base_ctx_enc).ln();
-            v.exp()
+                .sum::<f32>();
+
+            // ins
+            ln_prob += locus_info
+                .ins_cnt
+                .iter()
+                .enumerate()
+                .map(|(called_base_enc, &cnt)| {
+                    // print!("cnt: {} , ", cnt);
+
+                    cnt as f32
+                        * self
+                            .get_prob_with_ref_called_base(
+                                base_ctx_enc,
+                                called_base_enc as u8,
+                                CigarOp::Ins,
+                            )
+                            .ln()
+                })
+                .sum::<f32>();
+
+            // del
+            // print!("cnt: {} , ", locus_info.del_cnt);
+
+            ln_prob += 2.0 // 2.0 for more del penalty
+                * locus_info.del_cnt as f32
+                * self
+                    .get_prob_with_ref_called_base(base_ctx_enc, locus_info.base_enc, CigarOp::Del)
+                    .ln();
+
+            ln_prob += self.get_prob_with_ref_base(locus.base_ctx_enc).ln();
+            ln_prob.exp()
         };
 
-        let numerator = join_prob(locus.base_ctx_enc, &locus.plp_infos);
+        let numerator = join_prob(locus.base_ctx_enc, &locus);
+        // println!("numerator:{}", numerator);
 
-        let denominator = locus
-            .get_other_choices()
+        let denominator = self
+            .get_tot_choices(locus.base_ctx_enc)
             .into_iter()
-            .map(|ref_ctx_enc| join_prob(ref_ctx_enc, &locus.plp_infos))
+            .map(|ref_ctx_enc| join_prob(ref_ctx_enc, &locus))
             .sum::<f32>();
+
+        // println!("denominator:{}", denominator);
 
         numerator / denominator
     }
+
+    fn extract_ref_base_enc_from_base_ctx_enc(&self, base_ctx_enc: u8) -> u8 {
+        match self.get_ctx_len() {
+            1 => base_ctx_enc,
+            2 | 3 => (base_ctx_enc >> 2) & 0b11,
+            a => panic!("not a valid ctx len. {}", a),
+        }
+    }
+
+    fn get_tot_choices(&self, base_ctx_enc: u8) -> Vec<u8>;
 }
 
 // pub struct UnigramModel {
@@ -215,19 +278,82 @@ impl TriGramModel {
 }
 
 impl TModel for TriGramModel {
-    fn get_prob_with_ref_called_base(&self, ref_ctx_enc: u8, op: PlpState) -> f32 {
-        let key = match op {
-            PlpState::Eq(base_enc) | PlpState::Diff(base_enc) => {
-                format!("{}->{}", ref_ctx_enc, base_enc)
+    fn get_prob_with_ref_called_base(
+        &self,
+        ref_ctx_enc: u8,
+        called_base_enc: u8,
+        cigar_op: CigarOp,
+    ) -> f32 {
+        let key = match cigar_op {
+            CigarOp::Match | CigarOp::Eq | CigarOp::Diff => {
+                format!("{}->{}", ref_ctx_enc, called_base_enc)
             }
-            PlpState::Ins(base_enc) => format!("{}->+{}", ref_ctx_enc, base_enc),
-            PlpState::Del => format!("{}->", ref_ctx_enc),
+            CigarOp::Ins => format!("{}->+{}", ref_ctx_enc, called_base_enc),
+            CigarOp::Del => format!("{}->", ref_ctx_enc),
         };
 
-        *self.refcalled2prob.get(&key).unwrap()
+        let res = *self
+            .refcalled2prob
+            .get(&key)
+            .expect(&format!("key:{} not found", key));
+        // println!("{}={}", key, res);
+        res
     }
 
     fn get_ctx_len(&self) -> u8 {
         3
+    }
+
+    fn get_tot_choices(&self, base_ctx_enc: u8) -> Vec<u8> {
+        (0..4)
+            .into_iter()
+            .map(|base| base_ctx_enc & 0b11110011 | (base << 2))
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::{decode_base_ctx, LocusInfo};
+
+    use super::{TModel, TriGramModel};
+
+    #[test]
+    fn test_init_locus_info() {}
+
+    #[test]
+    fn test_posterior() {
+        let model = TriGramModel::new("model.param");
+        let mut locus_info = LocusInfo::new(0, b"AAA", 'A' as u8);
+        locus_info.add_match('A' as u8);
+        locus_info.add_del();
+        locus_info.add_del();
+        println!("{}", model.locus_posterior_prob(&locus_info));
+    }
+
+    #[test]
+    fn test_get_other_choices() {
+        let model = TriGramModel::new("model.param");
+        let mut encs = model.get_tot_choices(0);
+        encs.sort();
+        assert!(encs.len() == 4);
+
+        assert_eq!(
+            decode_base_ctx(encs[0], model.get_ctx_len() as usize),
+            "AAA"
+        );
+
+        assert_eq!(
+            decode_base_ctx(encs[1], model.get_ctx_len() as usize),
+            "ACA"
+        );
+        assert_eq!(
+            decode_base_ctx(encs[2], model.get_ctx_len() as usize),
+            "AGA"
+        );
+        assert_eq!(
+            decode_base_ctx(encs[3], model.get_ctx_len() as usize),
+            "ATA"
+        );
     }
 }

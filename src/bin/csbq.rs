@@ -10,7 +10,6 @@ use csbq::{
     cali_worker_for_hsc, calibrate_single_contig_use_bayes, collect_plp_info_from_record,
     collect_plp_worker, dump_locus_infos,
     models::{TModel, TriGramModel},
-    LocusInfo,
 };
 use gskits::{
     ds::ReadInfo,
@@ -149,19 +148,17 @@ pub fn hsc_csbq(
 
     let query_files = vec![query_bam_file.to_string()];
 
+    let model = if dump_train_data {
+        Box::new(TriGramModel::new_empty()) as Box<dyn TModel>
+    } else {
+        Box::new(TriGramModel::new(
+            model_path.as_ref().expect("--model needed"),
+        )) as Box<dyn TModel>
+    };
+
     let mut all_contig_locus_info = idx2target_seq
         .iter()
-        .map(|(tid, seq)| {
-            (
-                *tid,
-                seq.as_bytes()
-                    .iter()
-                    .copied()
-                    .enumerate()
-                    .map(|(pos, base)| LocusInfo::new(pos, &vec![base]))
-                    .collect::<Vec<_>>(),
-            )
-        })
+        .map(|(tid, seq)| (*tid, model.as_ref().init_locus_info(seq.as_bytes())))
         .collect::<HashMap<_, _>>();
 
     thread::scope(|s| {
@@ -194,13 +191,6 @@ pub fn hsc_csbq(
         }
         drop(qs_recv);
         drop(align_res_sender);
-        let model = if dump_train_data {
-            Box::new(TriGramModel::new_empty()) as Box<dyn TModel>
-        } else {
-            Box::new(TriGramModel::new(
-                model_path.as_ref().expect("--model needed"),
-            )) as Box<dyn TModel>
-        };
 
         // let model = if let Some(model_path_) = model_path {
         //     Box::new(UnigramModel::new(model_path_)) as Box<dyn TModel>
@@ -217,7 +207,7 @@ pub fn hsc_csbq(
         let mut buf_writer = BufWriter::new(file);
 
         if dump_train_data {
-            writeln!(&mut buf_writer, "ref_base_ctx_enc\tbase_enc\top").unwrap();
+            writeln!(&mut buf_writer, "ref_base_ctx_enc\tbase_enc\tcnt\top").unwrap();
             collect_plp_worker(
                 align_res_recv,
                 &mut all_contig_locus_info,
@@ -238,7 +228,6 @@ pub fn hsc_csbq(
                 dump_locus_infos(locus_infos, &mut buf_writer);
             });
             pb.finish();
-            
         } else {
             let calibrated_qual = cali_worker_for_hsc(
                 align_res_recv,
@@ -308,6 +297,12 @@ fn smc_csbq(
         .map(|(idx, read_info)| (idx, &read_info.seq))
         .collect::<HashMap<_, _>>();
 
+    let model = Box::new(TriGramModel::new(
+        model_path.as_ref().expect("--model needed"),
+    )) as Box<dyn TModel>;
+
+    let model = model.as_ref();
+
     thread::scope(|s| {
         let sorted_sbr = &sorted_sbr;
         let sorted_smc = &sorted_smc;
@@ -325,9 +320,9 @@ fn smc_csbq(
             );
         });
 
-        let threads = threads.unwrap_or(num_cpus::get_physical());
+        let threads = threads.unwrap_or(num_cpus::get());
         let (align_res_sender, align_res_recv) = crossbeam::channel::bounded(1000);
-        for _ in 0..threads {
+        for _ in 0..(threads / 2) {
             let sbr_and_smc_recv_ = sbr_and_smc_recv.clone();
             let align_res_sender_ = align_res_sender.clone();
             s.spawn(move || {
@@ -337,43 +332,55 @@ fn smc_csbq(
         drop(sbr_and_smc_recv);
         drop(align_res_sender);
 
-        let mut tid2cali_qual = HashMap::new();
+        
+        let (cali_qual_sender, cali_qual_receiver) = crossbeam::channel::bounded(1000);
+        for _ in 0..(threads / 2) {
+            let align_res_recv_ = align_res_recv.clone();
+            let cali_qual_sender_ = cali_qual_sender.clone();
 
-        let model = Box::new(TriGramModel::new(
-            model_path.as_ref().expect("--model needed"),
-        )) as Box<dyn TModel>;
+            s.spawn(move || {
+                for single_channel_align_res in align_res_recv_ {
+                    if single_channel_align_res.records.len() == 0 {
+                        continue;
+                    }
+                    let tid = unsafe { single_channel_align_res.records.get_unchecked(0).tid() };
 
-        let pb = pbar::get_spin_pb("do calibration".to_string(), pbar::DEFAULT_INTERVAL);
+                    let smc_read = idx2target_seq.get(&(tid as usize)).unwrap().as_bytes();
 
-        for single_channel_align_res in align_res_recv {
-            pb.inc(1);
-            if single_channel_align_res.records.len() == 0 {
-                continue;
-            }
-            let tid = unsafe { single_channel_align_res.records.get_unchecked(0).tid() };
+                    let mut smc_read_locus_info = model.init_locus_info(smc_read);
 
-            let smc_read = idx2target_seq.get(&(tid as usize)).unwrap().as_bytes();
+                    for record in &single_channel_align_res.records {
+                        collect_plp_info_from_record(
+                            record,
+                            &mut smc_read_locus_info,
+                            model,
+                        );
+                    }
 
-            let mut smc_read_locus_info = model.init_locus_info(smc_read);
-
-            for record in &single_channel_align_res.records {
-                collect_plp_info_from_record(record, &mut smc_read_locus_info, model.as_ref());
-            }
-
-            let qual = calibrate_single_contig_use_bayes(&smc_read_locus_info, model.as_ref());
-            tid2cali_qual.insert(tid, qual);
+                    let qual =
+                        calibrate_single_contig_use_bayes(&smc_read_locus_info, model);
+                    cali_qual_sender_.send((tid, qual)).unwrap();
+                }
+            });
         }
-        pb.finish();
+        drop(align_res_recv);
+        drop(cali_qual_sender);
 
-        let smc_name2cali_qual = tid2cali_qual
+        let pb = pbar::get_spin_pb(
+            "do calibration".to_string(),
+            pbar::DEFAULT_INTERVAL,
+        );
+        let smc_name2cali_qual = cali_qual_receiver
             .into_iter()
             .map(|(tid, qual)| {
+                pb.inc(1);
                 (
                     unsafe { bam_records.get_unchecked(tid as usize).name.clone() },
                     qual,
                 )
             })
             .collect::<HashMap<_, _>>();
+        pb.finish();
 
         let mut target_bam_file = BamReader::from_path(target_file).unwrap();
         target_bam_file.set_threads(10).unwrap();
@@ -406,15 +413,19 @@ fn smc_csbq(
             let record_ext = BamRecordExt::new(&record);
             let qname = record_ext.get_qname();
             let seq = record_ext.get_seq();
-            let qual = smc_name2cali_qual.get(&qname).unwrap();
-            record.set(qname.as_bytes(), None, seq.as_bytes(), qual);
-            record.remove_aux(b"rq").unwrap();
-            record
-                .push_aux(
-                    b"rq",
-                    rust_htslib::bam::record::Aux::Float(baseq2channelq(&qual)),
-                )
-                .unwrap();
+            if let Some(qual) = smc_name2cali_qual.get(&qname) {
+                record.set(qname.as_bytes(), None, seq.as_bytes(), qual);
+                record.remove_aux(b"rq").unwrap();
+                record
+                    .push_aux(
+                        b"rq",
+                        rust_htslib::bam::record::Aux::Float(baseq2channelq(&qual)),
+                    )
+                    .unwrap();
+            } else {
+                tracing::warn!("no cli result for qname:{}", qname);
+            }
+            
             o_bam_file.write(&record).unwrap();
         }
         pb.finish();
