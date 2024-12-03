@@ -247,9 +247,13 @@ pub struct TriGramModel {
 }
 
 impl TriGramModel {
-    pub fn new(fname: &str) -> Self {
-        let refcalled2prob = fs::read_to_string(fname)
-            .unwrap()
+    pub fn new(fname: Option<&str>) -> Self {
+        let model_param_str = if let Some(model_path) = fname {
+            fs::read_to_string(model_path).unwrap()
+        } else {
+            include_str!("../model.param").to_string()
+        };
+        let refcalled2prob = model_param_str
             .split("\n")
             .into_iter()
             .map(|line| {
@@ -323,7 +327,7 @@ mod test {
 
     #[test]
     fn test_posterior() {
-        let model = TriGramModel::new("model.param");
+        let model = TriGramModel::new(Some("model.param"));
         let mut locus_info = LocusInfo::new(0, b"AAA", 'A' as u8);
         locus_info.add_match('A' as u8);
         locus_info.add_del();
@@ -333,7 +337,7 @@ mod test {
 
     #[test]
     fn test_get_other_choices() {
-        let model = TriGramModel::new("model.param");
+        let model = TriGramModel::new(Some("model.param"));
         let mut encs = model.get_tot_choices(0);
         encs.sort();
         assert!(encs.len() == 4);

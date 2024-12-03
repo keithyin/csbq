@@ -152,7 +152,7 @@ pub fn hsc_csbq(
         Box::new(TriGramModel::new_empty()) as Box<dyn TModel>
     } else {
         Box::new(TriGramModel::new(
-            model_path.as_ref().expect("--model needed"),
+            model_path,
         )) as Box<dyn TModel>
     };
 
@@ -298,7 +298,7 @@ fn smc_csbq(
         .collect::<HashMap<_, _>>();
 
     let model = Box::new(TriGramModel::new(
-        model_path.as_ref().expect("--model needed"),
+        model_path,
     )) as Box<dyn TModel>;
 
     let model = model.as_ref();
@@ -332,7 +332,6 @@ fn smc_csbq(
         drop(sbr_and_smc_recv);
         drop(align_res_sender);
 
-        
         let (cali_qual_sender, cali_qual_receiver) = crossbeam::channel::bounded(1000);
         for _ in 0..(threads / 2) {
             let align_res_recv_ = align_res_recv.clone();
@@ -350,15 +349,10 @@ fn smc_csbq(
                     let mut smc_read_locus_info = model.init_locus_info(smc_read);
 
                     for record in &single_channel_align_res.records {
-                        collect_plp_info_from_record(
-                            record,
-                            &mut smc_read_locus_info,
-                            model,
-                        );
+                        collect_plp_info_from_record(record, &mut smc_read_locus_info, model);
                     }
 
-                    let qual =
-                        calibrate_single_contig_use_bayes(&smc_read_locus_info, model);
+                    let qual = calibrate_single_contig_use_bayes(&smc_read_locus_info, model);
                     cali_qual_sender_.send((tid, qual)).unwrap();
                 }
             });
@@ -366,10 +360,7 @@ fn smc_csbq(
         drop(align_res_recv);
         drop(cali_qual_sender);
 
-        let pb = pbar::get_spin_pb(
-            "do calibration".to_string(),
-            pbar::DEFAULT_INTERVAL,
-        );
+        let pb = pbar::get_spin_pb("do calibration".to_string(), pbar::DEFAULT_INTERVAL);
         let smc_name2cali_qual = cali_qual_receiver
             .into_iter()
             .map(|(tid, qual)| {
@@ -414,6 +405,7 @@ fn smc_csbq(
             let qname = record_ext.get_qname();
             let seq = record_ext.get_seq();
             if let Some(qual) = smc_name2cali_qual.get(&qname) {
+                // let mut record_new = BamRecord::new();
                 record.set(qname.as_bytes(), None, seq.as_bytes(), qual);
                 record.remove_aux(b"rq").unwrap();
                 record
@@ -422,10 +414,34 @@ fn smc_csbq(
                         rust_htslib::bam::record::Aux::Float(baseq2channelq(&qual)),
                     )
                     .unwrap();
+                // record_new
+                //     .push_aux(b"RG", record.aux(b"RG").unwrap())
+                //     .unwrap();
+                // record_new
+                //     .push_aux(b"ch", record.aux(b"ch").unwrap())
+                //     .unwrap();
+                // record_new
+                //     .push_aux(b"np", record.aux(b"np").unwrap())
+                //     .unwrap();
+
+                // record_new
+                //     .push_aux(
+                //         b"rq",
+                //         rust_htslib::bam::record::Aux::Float(baseq2channelq(&qual)),
+                //     )
+                //     .unwrap();
+
+                // record_new
+                //     .push_aux(b"op", record.aux(b"op").unwrap())
+                //     .unwrap();
+                // record_new
+                //     .push_aux(b"sc", record.aux(b"sc").unwrap())
+                //     .unwrap();
+                // record = record_new;
             } else {
                 tracing::warn!("no cli result for qname:{}", qname);
             }
-            
+
             o_bam_file.write(&record).unwrap();
         }
         pb.finish();

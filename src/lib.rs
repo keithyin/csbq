@@ -242,7 +242,7 @@ pub fn calibrate_single_contig_use_bayes(
     let qual = single_contig_locus_info
         .iter()
         .map(|locus_info| model.locus_posterior_prob(locus_info))
-        .map(|prob| (-10. * (1. - prob).log10()).round() as u8)
+        .map(|prob| (-10. * (1. - prob + 1e-6).log10()).round() as u8)
         .collect::<Vec<_>>();
     qual
 }
