@@ -213,7 +213,7 @@ pub fn hsc_csbq(
             "{}",
             output_filepath
         );
-        let file = fs::File::open(output_filepath).unwrap();
+        let file = fs::File::create(output_filepath).unwrap();
         let mut buf_writer = BufWriter::new(file);
 
         if dump_train_data {
@@ -224,9 +224,20 @@ pub fn hsc_csbq(
                 model.as_ref(),
                 true,
             );
-            all_contig_locus_info
-                .iter()
-                .for_each(|(_, locus_infos)| dump_locus_infos(locus_infos, &mut buf_writer));
+            let pb = pbar::get_bar_pb(
+                "dump locus info".to_string(),
+                pbar::DEFAULT_INTERVAL,
+                all_contig_locus_info
+                    .values()
+                    .into_iter()
+                    .map(|infos| infos.len())
+                    .sum::<usize>() as u64,
+            );
+            all_contig_locus_info.iter().for_each(|(_, locus_infos)| {
+                pb.inc(1);
+                dump_locus_infos(locus_infos, &mut buf_writer);
+            });
+            pb.finish();
             
         } else {
             let calibrated_qual = cali_worker_for_hsc(

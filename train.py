@@ -1,4 +1,5 @@
 import polars as pl
+import argparse
 
 
 def train(fname: str):
@@ -28,7 +29,11 @@ def train(fname: str):
         )
         .with_columns([pl.col("base_enc").fill_null("")])
         .select(
-            [pl.format("{}->{}={}", "ref_base_ctx_enc", "base_enc", "freq").alias("##res")]
+            [
+                pl.format("{}->{}={}", "ref_base_ctx_enc", "base_enc", "freq").alias(
+                    "##res"
+                )
+            ]
         )
     )
 
@@ -36,5 +41,6 @@ def train(fname: str):
 
 
 if __name__ == "__main__":
-    fname = ""
-    train(fname)
+    parser = argparse.ArgumentParser(prog="")
+    parser.add_argument("train_ins")
+    train(parser.parse_args().train_ins)
