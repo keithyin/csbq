@@ -1,6 +1,6 @@
 use std::{collections::HashMap, fs};
 
-use crate::{decode_base_ctx, LocusInfo};
+use crate::LocusInfo;
 
 #[derive(Debug, Clone, Copy)]
 pub enum CigarOp {
